@@ -69,7 +69,7 @@ def update_nginx_config(healthy_nodes_rpc, healthy_nodes_grpc, healthy_nodes_lcd
         if "limit_req_zone" in line:
             rate_limit_info = line.split()
             # Set the new rate limit
-            rate_limit_info[-1] = f"{new_rate}r/s;"
+            rate_limit_info[-1] = f"rate={new_rate}r/s;"
             config_lines[idx] = " ".join(rate_limit_info) + "\n"
             break
 
