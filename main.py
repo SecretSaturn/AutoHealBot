@@ -6,14 +6,17 @@ from datetime import datetime, timezone
 import dateutil.parser
 from dotenv import load_dotenv
 import subprocess  # Required for system commands
-
+import hashlib
 
 # Function to read URLs from file
-def read_urls(file_paths):
-    with open(file_paths, 'r') as file:
+def read_urls(file_path):
+    with open(file_path, 'r') as file:
         lines = file.readlines()
     return ["http://" + line.strip() + "/status?" for line in lines]
 
+# Function to compute hash of the NGINX configuration to detect changes
+def compute_config_hash(config_lines):
+    return hashlib.sha256(''.join(config_lines).encode()).hexdigest()
 
 # Load environment variables and read URLs
 load_dotenv()
@@ -22,11 +25,13 @@ grpc_port = os.getenv('GRPC_PORT', '9091')
 lcd_port = os.getenv('LCD_PORT', '1317')
 file_path = os.getenv('FILE_PATH')
 nginx_config_path = os.getenv('NGINX_CONFIG_PATH')
-urls = read_urls(file_path)
 time_before_fallen_behind = int(os.getenv('TIME_BEFORE_FALLEN_BEHIND', '30'))
 base_rate = int(os.getenv('BASE_RATE', 8))  # Default to 8 if not defined in .env
 node_multiplier = int(os.getenv('NODE_MULTIPLIER', 1))  # Default to 1 if not defined
-update_time = int(os.getenv('UPDATE_TIME','30'))
+update_time = int(os.getenv('UPDATE_TIME', '30'))
+dry_run = os.getenv('DRY_RUN', 'false').lower() == 'true'  # Dry run option
+
+urls = read_urls(file_path)
 
 # Function to check nodes' health
 async def check_nodes(urls):
@@ -63,6 +68,9 @@ def update_nginx_config(healthy_nodes_rpc, healthy_nodes_grpc, healthy_nodes_lcd
 
     with open(nginx_config_path, 'r') as file:
         config_lines = file.readlines()
+
+    # Compute current config hash to compare later
+    original_hash = compute_config_hash(config_lines)
 
     # Update the rate limit in NGINX configuration
     for idx, line in enumerate(config_lines):
@@ -104,16 +112,27 @@ def update_nginx_config(healthy_nodes_rpc, healthy_nodes_grpc, healthy_nodes_lcd
         else:
             logging.error(f"Upstream block '{upstream_name}' not found in the NGINX configuration.")
 
-    # Write the updated configuration to the file
-    with open(nginx_config_path, 'w') as file:
-        file.writelines(config_lines)
+    # Compute new config hash
+    updated_hash = compute_config_hash(config_lines)
 
-    # Reload NGINX configuration to apply changes
-    try:
-        #subprocess.run(["systemctl", "reload", "nginx"], check=True)
-        subprocess.run(["whoami"], check=True)
-    except subprocess.CalledProcessError as e:
-        logging.error("Failed to reload NGINX:", e)
+    # Write the updated configuration only if it has changed
+    if original_hash != updated_hash:
+        with open(nginx_config_path, 'w') as file:
+            file.writelines(config_lines)
+        
+        if dry_run:
+            # Dry run mode: Print a message instead of reloading
+            logging.info("Dry run enabled - Config changes detected, but NGINX reload is skipped.")
+            subprocess.run(["whoami"], check=True)
+        else:
+            # Reload NGINX configuration to apply changes
+            try:
+                subprocess.run(["systemctl", "reload", "nginx"], check=True)
+                logging.info("NGINX reloaded successfully.")
+            except subprocess.CalledProcessError as e:
+                logging.error("Failed to reload NGINX:", e)
+    else:
+        logging.info("No changes detected in NGINX configuration. Reload skipped.")
 
 # Main function to orchestrate health checks and NGINX updates
 async def main():
